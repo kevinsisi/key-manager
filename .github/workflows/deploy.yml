@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: kevin950805/key-manager
+  DOCKERHUB_USERNAME: kevin950805
 
 jobs:
   deploy:
@@ -19,14 +19,20 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Connect to Tailscale
-        uses: tailscale/github-action@v2
+        uses: tailscale/github-action@v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:github-actions
+
+      - name: Test Tailscale Connection
+        run: |
+          echo "Testing connection to deployment server..."
+          tailscale status
+          ping -c 3 ${{ secrets.DEPLOY_SERVER_IP }}
 
       - name: Setup SSH
         run: |
@@ -35,53 +41,89 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H ${{ secrets.DEPLOY_SERVER_IP }} >> ~/.ssh/known_hosts
 
+      - name: Sync docker-compose.yml to server
+        env:
+          DEPLOY_SERVER_IP: ${{ secrets.DEPLOY_SERVER_IP }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "${DEPLOY_USER}@${DEPLOY_SERVER_IP}" "mkdir -p '${DEPLOY_PATH}'"
+          scp -i ~/.ssh/deploy_key docker-compose.yml "${DEPLOY_USER}@${DEPLOY_SERVER_IP}:${DEPLOY_PATH}/docker-compose.yml"
+
       - name: Deploy via SSH
         env:
           DEPLOY_SERVER_IP: ${{ secrets.DEPLOY_SERVER_IP }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
-          ssh -i ~/.ssh/deploy_key ${DEPLOY_USER}@${DEPLOY_SERVER_IP} '
+          ssh -i ~/.ssh/deploy_key "${DEPLOY_USER}@${DEPLOY_SERVER_IP}" "
             set -e
-            echo "Navigating to deployment directory..."
-            cd '"${DEPLOY_PATH}"'
 
-            echo "Pulling latest image..."
-            docker compose pull
+            retry_pull() {
+              local max_attempts=3
+              local attempt=1
+              local delay=10
 
-            echo "Restarting container..."
-            docker compose up -d --force-recreate
+              while [ \$attempt -le \$max_attempts ]; do
+                echo \"Pulling Docker images (attempt \$attempt/\$max_attempts)...\"
+                if docker compose -f docker-compose.yml pull; then
+                  echo \"Pull successful!\"
+                  return 0
+                fi
 
-            echo "Cleaning up old images..."
-            docker image prune -af --filter "until=24h" || true
+                if [ \$attempt -lt \$max_attempts ]; then
+                  echo \"Pull failed, retrying in \${delay}s...\"
+                  sleep \$delay
+                  delay=\$((delay * 2))
+                fi
+                attempt=\$((attempt + 1))
+              done
 
-            echo "Deployment complete!"
-            docker compose ps
-          '
+              echo \"Pull failed after \$max_attempts attempts\"
+              return 1
+            }
+
+            echo \"Navigating to deployment directory...\"
+            cd \"${DEPLOY_PATH}\"
+
+            retry_pull
+
+            echo \"Force removing any leftover containers...\"
+            docker rm -f key-manager 2>/dev/null || true
+
+            echo \"Stopping existing containers...\"
+            docker compose -f docker-compose.yml down --remove-orphans --volumes=false
+
+            echo \"Starting updated containers...\"
+            docker compose -f docker-compose.yml up -d --force-recreate
+
+            echo \"Cleaning up old images...\"
+            docker image prune -af --filter \"until=24h\" || true
+
+            echo \"Deployment completed successfully!\"
+            docker compose -f docker-compose.yml ps
+          "
 
       - name: Health Check
-        env:
-          DEPLOY_SERVER_IP: ${{ secrets.DEPLOY_SERVER_IP }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
         run: |
-          for i in $(seq 1 12); do
-            echo "Health check attempt $i/12..."
-            if ssh -i ~/.ssh/deploy_key ${DEPLOY_USER}@${DEPLOY_SERVER_IP} \
-              'docker exec key-manager node -e "require(\"http\").get(\"http://localhost:7823/api/keys\",(r)=>{process.exit(r.statusCode===200?0:1)}).on(\"error\",()=>process.exit(1))"' 2>/dev/null; then
-              echo "Health check passed!"
-              exit 0
-            fi
-            sleep 5
-          done
-          ssh -i ~/.ssh/deploy_key ${DEPLOY_USER}@${DEPLOY_SERVER_IP} \
-            'docker compose ps; docker logs key-manager --tail 30' || true
-          echo "Health check failed"
-          exit 1
+          echo "Performing health check..."
+          sleep 10
+          curl -f http://${{ secrets.DEPLOY_SERVER_IP }}:7823/ || exit 1
+          echo "Health check passed!"
 
       - name: Deployment Summary
         if: always()
         run: |
           echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Image**: \`${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Deployed at: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Server**: \`${{ secrets.DEPLOY_SERVER_IP }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: \`${{ env.DOCKERHUB_USERNAME }}/key-manager:latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Port**: 7823:7823" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Deployed at: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify on Failure
+        if: failure()
+        run: |
+          echo "Deployment failed! Please check the logs above." >> $GITHUB_STEP_SUMMARY
