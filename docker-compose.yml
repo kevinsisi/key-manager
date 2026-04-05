@@ -1,0 +1,15 @@
+services:
+  key-manager:
+    image: kevin950805/key-manager:latest
+    container_name: key-manager
+    restart: unless-stopped
+    ports:
+      - "7823:7823"
+    environment:
+      - PORT=7823
+      - DATABASE_PATH=/app/data/key-manager.db
+    volumes:
+      - key-manager-data:/app/data
+
+volumes:
+  key-manager-data:
