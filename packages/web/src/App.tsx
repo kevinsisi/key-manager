@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Key, Plus, RefreshCw, Zap, Edit2, Trash2, TestTube } from "lucide-react";
+import { Key, Plus, RefreshCw, Zap, Edit2, Trash2, TestTube, ClipboardCopy, Check } from "lucide-react";
 import { StatusBadge } from "./components/StatusBadge.tsx";
 import { AddKeyModal } from "./components/AddKeyModal.tsx";
 import { EditKeyModal } from "./components/EditKeyModal.tsx";
@@ -52,6 +52,7 @@ export default function App() {
   const [showAdd, setShowAdd] = useState(false);
   const [editKey, setEditKey] = useState<ApiKey | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -132,6 +133,29 @@ export default function App() {
     }
   }
 
+  async function handleCopyKeys() {
+    const data = await apiFetch<{ total: number; groups: Record<string, string[]> }>("/api/keys/export");
+    const { total, groups } = data;
+
+    const lines: string[] = [];
+    lines.push(`# ===== 可用 Key Pool（${total} keys，去重後）=====`);
+
+    for (const [owner, ownerKeys] of Object.entries(groups)) {
+      lines.push("");
+      lines.push(`# -${owner} (${ownerKeys.length})`);
+      for (const k of ownerKeys) lines.push(k);
+    }
+
+    lines.push("");
+    lines.push(`# ===== .env 一鍵貼上（去重 ${total} keys）=====`);
+    const allKeys = Object.values(groups).flat();
+    lines.push(`# GEMINI_API_KEYS=${allKeys.join(",")}`);
+
+    await navigator.clipboard.writeText(lines.join("\n"));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2500);
+  }
+
   function formatDate(iso: string | null) {
     if (!iso) return "—";
     const d = new Date(iso + (iso.endsWith("Z") ? "" : "Z"));
@@ -179,6 +203,15 @@ export default function App() {
           >
             <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
             Refresh
+          </button>
+          <button
+            onClick={handleCopyKeys}
+            disabled={keys.filter((k) => k.status === "active" || k.status === "cooldown").length === 0}
+            className="inline-flex items-center gap-2 border border-purple-300 text-purple-700 bg-purple-50 px-4 py-2 rounded-lg text-sm font-medium hover:bg-purple-100 transition-colors disabled:opacity-50"
+            title="複製全部可用金鑰（按擁有者分組 + .env 格式）"
+          >
+            {copied ? <Check size={16} className="text-green-600" /> : <ClipboardCopy size={16} />}
+            {copied ? "已複製！" : "複製可用金鑰"}
           </button>
           {progress && (
             <span className="text-sm text-gray-500 italic">{progress}</span>

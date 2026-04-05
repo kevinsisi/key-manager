@@ -58,6 +58,32 @@ router.get("/", (_req, res) => {
   res.json(rows.map(toPublic));
 });
 
+// ── GET /api/keys/export ──────────────────────────────────────────
+// Returns full key values for active/cooldown keys, grouped by account (deduped)
+router.get("/export", (_req, res) => {
+  const rows = db
+    .prepare(
+      "SELECT * FROM api_keys WHERE status IN ('active', 'cooldown') ORDER BY account_name, created_at"
+    )
+    .all() as ApiKey[];
+
+  const grouped = new Map<string, string[]>();
+  const seenKeys = new Set<string>();
+
+  for (const row of rows) {
+    if (seenKeys.has(row.key_value)) continue;
+    seenKeys.add(row.key_value);
+    const owner = row.account_name.trim() || "無擁有者";
+    if (!grouped.has(owner)) grouped.set(owner, []);
+    grouped.get(owner)!.push(row.key_value);
+  }
+
+  res.json({
+    total: seenKeys.size,
+    groups: Object.fromEntries(grouped),
+  });
+});
+
 // ── POST /api/keys ────────────────────────────────────────────────
 router.post("/", (req, res) => {
   const { key_value, account_name = "", projects = "" } = req.body ?? {};
