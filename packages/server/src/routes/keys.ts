@@ -84,6 +84,105 @@ router.get("/export", (_req, res) => {
   });
 });
 
+// ── Helpers: batch input parser ────────────────────────────────────
+function parseBatchInput(raw: string): string[] {
+  const text = raw.trim();
+  if (!text) return [];
+
+  // JSON array
+  if (text.startsWith("[")) {
+    try {
+      const arr = JSON.parse(text);
+      if (Array.isArray(arr))
+        return arr
+          .filter((x) => typeof x === "string")
+          .map((x) => (x as string).trim())
+          .filter(Boolean);
+    } catch {}
+  }
+
+  const lines = text.split(/\r?\n/);
+  const extracted: string[] = [];
+
+  for (const rawLine of lines) {
+    let line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+
+    // strip export prefix (.env style)
+    if (line.startsWith("export ")) line = line.slice(7).trim();
+
+    // key=value: take value after first =
+    const eqIdx = line.indexOf("=");
+    if (eqIdx !== -1) {
+      const lhs = line.slice(0, eqIdx).trim();
+      if (/^\w+$/.test(lhs)) {
+        line = line.slice(eqIdx + 1).trim().replace(/^["']|["']$/g, "");
+      }
+    }
+
+    // comma-separated within a line
+    if (line.includes(",")) {
+      extracted.push(...line.split(",").map((p) => p.trim()).filter(Boolean));
+    } else if (line) {
+      extracted.push(line);
+    }
+  }
+
+  // fallback: entire input is comma-separated (no newlines)
+  if (extracted.length === 0 && text.includes(",")) {
+    extracted.push(...text.split(",").map((p) => p.trim()).filter(Boolean));
+  }
+
+  return extracted;
+}
+
+// ── POST /api/keys/batch-import ────────────────────────────────────
+router.post("/batch-import", (req, res) => {
+  const { raw_text, account_name = "", projects = "" } = req.body ?? {};
+
+  if (!raw_text || typeof raw_text !== "string") {
+    res.status(400).json({ error: "raw_text is required" });
+    return;
+  }
+
+  const candidates = parseBatchInput(raw_text);
+  if (candidates.length === 0) {
+    res.json({ imported: 0, duplicates: 0, invalid: 0, errors: [] });
+    return;
+  }
+
+  const stmt = db.prepare(
+    "INSERT INTO api_keys (key_value, account_name, projects) VALUES (?, ?, ?)"
+  );
+
+  let imported = 0;
+  let duplicates = 0;
+  let invalid = 0;
+  const errors: string[] = [];
+
+  for (const key of candidates) {
+    const trimmed = key.trim();
+    if (!trimmed.startsWith("AIza") || trimmed.length < 20) {
+      invalid++;
+      errors.push(`Invalid format: …${trimmed.slice(-8) || trimmed}`);
+      continue;
+    }
+    try {
+      stmt.run(trimmed, String(account_name).trim(), String(projects).trim());
+      imported++;
+    } catch (err: any) {
+      if (err.code === "SQLITE_CONSTRAINT_UNIQUE") {
+        duplicates++;
+      } else {
+        invalid++;
+        errors.push(`Failed to insert: …${trimmed.slice(-8)}`);
+      }
+    }
+  }
+
+  res.json({ imported, duplicates, invalid, errors });
+});
+
 // ── POST /api/keys ────────────────────────────────────────────────
 router.post("/", (req, res) => {
   const { key_value, account_name = "", projects = "" } = req.body ?? {};

@@ -3,6 +3,7 @@ import { Key, Plus, RefreshCw, Zap, Edit2, Trash2, TestTube, ClipboardCopy, Chec
 import { StatusBadge } from "./components/StatusBadge.tsx";
 import { AddKeyModal } from "./components/AddKeyModal.tsx";
 import { EditKeyModal } from "./components/EditKeyModal.tsx";
+import { BatchImportSection } from "./components/BatchImportSection.tsx";
 import type { ApiKey } from "./types.ts";
 
 // ── API helpers ────────────────────────────────────────────────────
@@ -217,6 +218,9 @@ export default function App() {
             <span className="text-sm text-gray-500 italic">{progress}</span>
           )}
         </div>
+
+        {/* Batch Import */}
+        <BatchImportSection onImported={load} />
 
         {/* Table */}
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
