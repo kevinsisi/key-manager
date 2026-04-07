@@ -6,6 +6,7 @@ services:
     ports:
       - "7823:7823"
     environment:
+      - TZ=Asia/Taipei
       - PORT=7823
       - DATABASE_PATH=/app/data/key-manager.db
     volumes:
