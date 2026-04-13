@@ -78,7 +78,7 @@ Base path: `/api/keys`
 | `DELETE` | `/:id` | Remove key |
 | `POST` | `/:id/test` | Test single key against Google API → `{status}` |
 | `POST` | `/test-all` | Test all keys via SSE stream (`text/event-stream`); emits `{id, status}` per key |
-| `GET` | `/quota-summary` | Aggregate key counts by status: `available / exhausted / rate_limited / invalid / unknown` |
+| `GET` | `/quota-summary` | Aggregate raw key counts + trusted quota-bucket summary |
 
 **Key validation:** must start with `AIza`, min length 20.
 
@@ -96,8 +96,11 @@ Base path: `/api/keys`
 - **Gemini free-tier limitation:** Free-tier keys do NOT return `X-RateLimit-*` headers. The only reliable way to distinguish `exhausted` vs `rate_limited` is by parsing the error message body from the 429 response.
 
 **quota-summary endpoint:** `GET /api/keys/quota-summary`
-- Returns aggregate counts of keys per status: `{ available, exhausted, rate_limited, invalid, unknown }`
-- Used by consumers (e.g., `ai-core`) to decide which pool to draw from without exposing individual key values.
+- Returns both raw per-key status counts and trusted bucket-aware counts.
+- `projects` tags are interpreted as quota-bucket hints; the **first tag** is treated as the canonical bucket ID.
+- Keys without bucket tags are reported as `unscoped` and do **not** count toward `trusted_available_keys`.
+- Buckets whose keys disagree (`available` + `exhausted` in the same bucket) are marked `mixed` and do **not** count toward trusted capacity.
+- Used by consumers (e.g., `ai-core`) to decide whether a pool is truly usable without exposing full key values.
 
 ---
 
@@ -151,7 +154,7 @@ key-manager acts as the central key registry. Consumer services (built on `@kevi
 }
 ```
 
-Only `active` and `cooldown` keys are included. `invalid` and `unknown` keys are excluded.
+Default mode remains legacy/raw for backward compatibility, but `GET /api/keys/export?trusted_only=1` returns only keys from trusted `available` buckets.
 
 ### Consumer Sync Workflow
 

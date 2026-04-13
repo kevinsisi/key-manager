@@ -4,11 +4,16 @@ import { AlertCircle, CheckCircle2, ChevronDown, ChevronUp, Upload } from "lucid
 const KNOWN_PROJECTS = [
   "mind-diary",
   "project-bridge",
+  "sheet-to-car",
   "ai-lunch-mind",
   "auto-spec-test",
   "docker-app-portal",
   "onshape-skill",
 ];
+
+function parseTags(text: string): string[] {
+  return text.split(",").map((part) => part.trim()).filter(Boolean);
+}
 
 // Client-side parser mirrors the server-side parseBatchInput logic for live preview
 function parseBatchInput(raw: string): string[] {
@@ -74,15 +79,18 @@ export function BatchImportSection({ onImported }: Props) {
   const [rawText, setRawText] = useState("");
   const [accountName, setAccountName] = useState("");
   const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
+  const [projectText, setProjectText] = useState("");
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
 
   const parsedKeys = useMemo(() => parseBatchInput(rawText), [rawText]);
 
   function toggleProject(p: string) {
-    setSelectedProjects((prev) =>
-      prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]
-    );
+    setSelectedProjects((prev) => {
+      const next = prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p];
+      setProjectText(next.join(", "));
+      return next;
+    });
   }
 
   async function handleImport() {
@@ -96,7 +104,7 @@ export function BatchImportSection({ onImported }: Props) {
         body: JSON.stringify({
           raw_text: rawText,
           account_name: accountName,
-          projects: selectedProjects.join(","),
+          projects: parseTags(projectText).join(","),
         }),
       });
       const data: ImportResult = await res.json();
@@ -176,8 +184,19 @@ export function BatchImportSection({ onImported }: Props) {
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                Projects
+                Quota Bucket Tags
               </label>
+              <input
+                type="text"
+                value={projectText}
+                onChange={(e) => {
+                  setProjectText(e.target.value);
+                  setSelectedProjects(parseTags(e.target.value));
+                }}
+                placeholder="e.g. molten-mariner-491403-r3, sheet-to-car"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mb-2"
+              />
+              <p className="text-xs text-gray-500 mb-2">第一個 tag 會當作 quota bucket ID；共用同一個 Google project 的 keys 第一個 tag 必須一致。</p>
               <div className="flex flex-wrap gap-1.5">
                 {KNOWN_PROJECTS.map((p) => (
                   <button

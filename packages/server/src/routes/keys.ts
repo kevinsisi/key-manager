@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { db } from "../db/connection.js";
+import { normalizeStatus, summarizeQuota, type KeyRecordLike } from "../quota.js";
 
 const router = Router();
 
@@ -15,11 +16,15 @@ interface ApiKey {
   rpd_limit: number | null;
   rpd_remaining: number | null;
   reset_at: string | null;
+  status_reason: string | null;
+  quota_scope: string | null;
 }
 
 interface TestResult {
   status: "available" | "exhausted" | "rate_limited" | "invalid" | "error";
   resetAt: string | null;
+  statusReason: string;
+  quotaScope: "project" | "key" | "unknown";
 }
 
 // ── Helpers ───────────────────────────────────────────────────────
@@ -30,12 +35,13 @@ function maskKey(key: string): string {
 }
 
 function toPublic(row: ApiKey) {
+  const normalizedStatus = normalizeStatus(row.status);
   return {
     id: row.id,
     account_name: row.account_name,
     key_masked: maskKey(row.key_value),
     key_suffix: row.key_value.slice(-8),
-    status: row.status,
+    status: normalizedStatus,
     last_tested_at: row.last_tested_at,
     projects: row.projects
       ? row.projects.split(",").map((p) => p.trim()).filter(Boolean)
@@ -44,6 +50,8 @@ function toPublic(row: ApiKey) {
     rpd_limit: row.rpd_limit ?? null,
     rpd_remaining: row.rpd_remaining ?? null,
     reset_at: row.reset_at ?? null,
+    status_reason: row.status_reason ?? "",
+    quota_scope: row.quota_scope ?? "unknown",
   };
 }
 
@@ -79,38 +87,77 @@ async function testKey(key: string): Promise<TestResult> {
       signal: AbortSignal.timeout(10_000),
     });
 
-    if (res.ok) return { status: "available", resetAt: null };
+    if (res.ok) return { status: "available", resetAt: null, statusReason: "generateContent probe succeeded", quotaScope: "unknown" };
+
+    let body: unknown = {};
+    try { body = await res.json(); } catch { /* ignore */ }
+    const bodyText = JSON.stringify(body);
+    const msg = bodyText.toLowerCase();
+    const quotaId = bodyText.match(/Generate\w+/)?.[0] || "";
+    const quotaScope = /perproject|project/i.test(quotaId) || msg.includes("perproject") || msg.includes("per project")
+      ? "project"
+      : "unknown";
+    const retryDelayMatch = bodyText.match(/"retryDelay":"(\d+)s"/i);
 
     if (res.status === 429) {
-      let body: unknown = {};
-      try { body = await res.json(); } catch { /* ignore */ }
-      const msg = JSON.stringify(body).toLowerCase();
       if (msg.includes("daily") || msg.includes("resource_exhausted")) {
-        return { status: "exhausted", resetAt: nextPacificMidnightISO() };
+        return {
+          status: "exhausted",
+          resetAt: nextPacificMidnightISO(),
+          statusReason: quotaId || "quota exceeded",
+          quotaScope,
+        };
       }
       if (msg.includes("rate")) {
-        return { status: "rate_limited", resetAt: new Date(Date.now() + 60_000).toISOString() };
+        const retryMs = retryDelayMatch ? Number(retryDelayMatch[1]) * 1_000 : 60_000;
+        return {
+          status: "rate_limited",
+          resetAt: new Date(Date.now() + retryMs).toISOString(),
+          statusReason: quotaId || "rate limited",
+          quotaScope,
+        };
       }
-      return { status: "exhausted", resetAt: nextPacificMidnightISO() };
+      return {
+        status: "exhausted",
+        resetAt: nextPacificMidnightISO(),
+        statusReason: quotaId || "429 quota failure",
+        quotaScope,
+      };
     }
 
     if (res.status === 401 || res.status === 403) {
-      return { status: "invalid", resetAt: null };
+      return { status: "invalid", resetAt: null, statusReason: `HTTP ${res.status}`, quotaScope: "unknown" };
     }
 
-    return { status: "error", resetAt: null };
+    return { status: "error", resetAt: null, statusReason: `HTTP ${res.status}`, quotaScope: "unknown" };
   } catch {
-    return { status: "error", resetAt: null };
+    return { status: "error", resetAt: null, statusReason: "request failed", quotaScope: "unknown" };
   }
 }
 
 function applyTestResult(id: number, result: TestResult): void {
   db.prepare(
     `UPDATE api_keys
-     SET status = ?, last_tested_at = datetime('now'),
-         rpd_limit = NULL, rpd_remaining = NULL, reset_at = ?
-     WHERE id = ?`
-  ).run(result.status, result.resetAt, id);
+      SET status = ?, last_tested_at = datetime('now'),
+         rpd_limit = NULL, rpd_remaining = NULL, reset_at = ?,
+         status_reason = ?, quota_scope = ?
+      WHERE id = ?`
+  ).run(result.status, result.resetAt, result.statusReason, result.quotaScope, id);
+}
+
+function groupRowsForExport(rows: Array<{ row: KeyRecordLike }>): Record<string, string[]> {
+  const grouped = new Map<string, string[]>();
+  const seenKeys = new Set<string>();
+
+  for (const { row } of rows) {
+    if (seenKeys.has(row.key_value)) continue;
+    seenKeys.add(row.key_value);
+    const owner = row.account_name.trim() || "無擁有者";
+    if (!grouped.has(owner)) grouped.set(owner, []);
+    grouped.get(owner)!.push(row.key_value);
+  }
+
+  return Object.fromEntries(grouped);
 }
 
 // ── GET /api/keys ─────────────────────────────────────────────────
@@ -126,29 +173,36 @@ router.get("/quota-summary", (_req, res) => {
   const rows = db
     .prepare("SELECT * FROM api_keys ORDER BY created_at DESC")
     .all() as ApiKey[];
-
-  const available = rows.filter((r) => r.status === "available").length;
-  const exhausted = rows.filter((r) => r.status === "exhausted").length;
-  const rateLimited = rows.filter((r) => r.status === "rate_limited").length;
-  const invalid = rows.filter((r) => r.status === "invalid").length;
-  const unknown = rows.filter((r) => r.status === "unknown").length;
-  const neverTested = rows.filter((r) => r.last_tested_at === null).length;
+  const summary = summarizeQuota(rows as KeyRecordLike[]);
 
   res.json({
     total: rows.length,
-    available,
-    exhausted,
-    rate_limited: rateLimited,
-    invalid,
-    unknown,
-    neverTested,
-    keys: rows.map((r) => ({
-      id: r.id,
-      account_name: r.account_name,
-      key_suffix: r.key_value.slice(-8),
-      status: r.status,
-      reset_at: r.reset_at ?? null,
-      last_tested_at: r.last_tested_at,
+    available: summary.rawCounts.available,
+    exhausted: summary.rawCounts.exhausted,
+    rate_limited: summary.rawCounts.rate_limited,
+    invalid: summary.rawCounts.invalid,
+    error: summary.rawCounts.error,
+    unknown: summary.rawCounts.unknown,
+    neverTested: summary.neverTested,
+    trusted_available_keys: summary.trustedAvailableKeys,
+    trusted_available_buckets: summary.trustedAvailableBuckets,
+    unscoped_keys: summary.unscopedKeys,
+    mixed_buckets: summary.mixedBuckets,
+    warnings: summary.warnings,
+    buckets: summary.buckets,
+    keys: summary.assessments.map((assessment) => ({
+      id: assessment.row.id,
+      account_name: assessment.row.account_name,
+      key_suffix: assessment.row.key_value.slice(-8),
+      status: assessment.normalized_status,
+      reset_at: assessment.row.reset_at ?? null,
+      last_tested_at: assessment.row.last_tested_at,
+      bucket_id: assessment.bucket_id,
+      bucket_label: assessment.bucket_label,
+      bucket_status: assessment.bucket_status,
+      bucket_trust: assessment.bucket_trust,
+      quota_scope: assessment.row.quota_scope ?? "unknown",
+      status_reason: assessment.row.status_reason ?? "",
     })),
   });
 });
@@ -156,26 +210,28 @@ router.get("/quota-summary", (_req, res) => {
 // ── GET /api/keys/export ──────────────────────────────────────────
 // Returns full key values for active/cooldown keys, grouped by account (deduped)
 router.get("/export", (_req, res) => {
+  const trustedOnly = _req.query.trusted_only === "1" || _req.query.trusted_only === "true";
   const rows = db
     .prepare(
-      "SELECT * FROM api_keys WHERE status = 'available' ORDER BY account_name, created_at"
+      "SELECT * FROM api_keys ORDER BY account_name, created_at"
     )
     .all() as ApiKey[];
 
-  const grouped = new Map<string, string[]>();
-  const seenKeys = new Set<string>();
-
-  for (const row of rows) {
-    if (seenKeys.has(row.key_value)) continue;
-    seenKeys.add(row.key_value);
-    const owner = row.account_name.trim() || "無擁有者";
-    if (!grouped.has(owner)) grouped.set(owner, []);
-    grouped.get(owner)!.push(row.key_value);
-  }
+  const summary = summarizeQuota(rows as KeyRecordLike[]);
+  const rawExportRows = summary.assessments.filter((assessment) => assessment.normalized_status === "available");
+  const trustedExportRows = rawExportRows.filter(
+    (assessment) => assessment.bucket_trust === "scoped" && assessment.bucket_status === "available"
+  );
+  const selectedRows = trustedOnly ? trustedExportRows : rawExportRows;
 
   res.json({
-    total: seenKeys.size,
-    groups: Object.fromEntries(grouped),
+    mode: trustedOnly ? "trusted" : "legacy",
+    total: selectedRows.length,
+    trusted_total: trustedExportRows.length,
+    legacy_total: rawExportRows.length,
+    groups: groupRowsForExport(selectedRows),
+    trusted_groups: groupRowsForExport(trustedExportRows),
+    warnings: summary.warnings,
   });
 });
 

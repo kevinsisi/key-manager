@@ -4,11 +4,16 @@ import { X } from "lucide-react";
 const KNOWN_PROJECTS = [
   "mind-diary",
   "project-bridge",
+  "sheet-to-car",
   "ai-lunch-mind",
   "auto-spec-test",
   "docker-app-portal",
   "onshape-skill",
 ];
+
+function parseTags(text: string): string[] {
+  return text.split(",").map((part) => part.trim()).filter(Boolean);
+}
 
 interface Props {
   onClose: () => void;
@@ -19,13 +24,16 @@ export function AddKeyModal({ onClose, onAdd }: Props) {
   const [keyValue, setKeyValue] = useState("");
   const [accountName, setAccountName] = useState("");
   const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
+  const [projectText, setProjectText] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
   function toggleProject(p: string) {
-    setSelectedProjects((prev) =>
-      prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]
-    );
+    setSelectedProjects((prev) => {
+      const next = prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p];
+      setProjectText(next.join(", "));
+      return next;
+    });
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -40,7 +48,7 @@ export function AddKeyModal({ onClose, onAdd }: Props) {
       await onAdd({
         key_value: keyValue.trim(),
         account_name: accountName.trim(),
-        projects: selectedProjects.join(","),
+        projects: parseTags(projectText).join(","),
       });
       onClose();
     } catch (err: any) {
@@ -90,8 +98,19 @@ export function AddKeyModal({ onClose, onAdd }: Props) {
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
-              Used In Projects
+              Quota Bucket Tags
             </label>
+            <input
+              type="text"
+              value={projectText}
+              onChange={(e) => {
+                setProjectText(e.target.value);
+                setSelectedProjects(parseTags(e.target.value));
+              }}
+              placeholder="e.g. molten-mariner-491403-r3, sheet-to-car"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mb-2"
+            />
+            <p className="text-xs text-gray-500 mb-2">第一個 tag 會當作 quota bucket ID；共用同一個 Google project 的 keys 第一個 tag 必須一致。</p>
             <div className="flex flex-wrap gap-2">
               {KNOWN_PROJECTS.map((p) => (
                 <button
