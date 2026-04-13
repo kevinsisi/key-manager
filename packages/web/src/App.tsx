@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { Key, Plus, RefreshCw, Zap, Edit2, Trash2, TestTube, ClipboardCopy, Check } from "lucide-react";
+import { Key, Plus, RefreshCw, Zap, Edit2, Trash2, TestTube, ClipboardCopy, Check, BarChart2 } from "lucide-react";
 import { StatusBadge } from "./components/StatusBadge.tsx";
 import { AddKeyModal } from "./components/AddKeyModal.tsx";
 import { EditKeyModal } from "./components/EditKeyModal.tsx";
 import { BatchImportSection } from "./components/BatchImportSection.tsx";
-import type { ApiKey } from "./types.ts";
+import type { ApiKey, QuotaSummary } from "./types.ts";
 
 // ── API helpers ────────────────────────────────────────────────────
 async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
@@ -15,6 +15,19 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const json = await res.json();
   if (!res.ok) throw new Error(json.error || "Request failed");
   return json as T;
+}
+
+// ── Taipei time formatter ──────────────────────────────────────────
+function formatTaipei(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso.endsWith("Z") ? iso : iso + "Z");
+  if (isNaN(d.getTime())) {
+    // Try parsing as Unix seconds
+    const n = Number(iso);
+    if (!isNaN(n)) return new Date(n * 1000).toLocaleString("zh-TW", { timeZone: "Asia/Taipei", hour12: false });
+    return iso;
+  }
+  return d.toLocaleString("zh-TW", { timeZone: "Asia/Taipei", hour12: false });
 }
 
 // ── Stats bar ──────────────────────────────────────────────────────
@@ -44,9 +57,67 @@ function Stats({ keys }: { keys: ApiKey[] }) {
   );
 }
 
+// ── Quota summary bar ──────────────────────────────────────────────
+function QuotaBar({ summary }: { summary: QuotaSummary | null }) {
+  if (!summary) return null;
+
+  const hasQuota = summary.totalRpdLimit > 0;
+  const pct = hasQuota ? Math.round((summary.totalRpdRemaining / summary.totalRpdLimit) * 100) : 0;
+  const barColor = pct > 50 ? "bg-green-500" : pct > 20 ? "bg-yellow-500" : "bg-red-500";
+
+  // Earliest reset time among active keys that have one
+  const resets = summary.keys
+    .filter((k) => k.status === "active" && k.reset_at)
+    .map((k) => {
+      const n = Number(k.reset_at);
+      return isNaN(n) ? new Date(k.reset_at!).getTime() : n * 1000;
+    })
+    .filter((t) => !isNaN(t));
+  const earliestReset = resets.length > 0 ? Math.min(...resets) : null;
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-4 mb-6 shadow-sm">
+      <div className="flex items-center gap-2 mb-2">
+        <BarChart2 size={16} className="text-blue-600" />
+        <span className="text-sm font-medium text-gray-700">RPD Quota (active keys)</span>
+        {summary.neverTested > 0 && (
+          <span className="text-xs text-gray-400 ml-auto">{summary.neverTested} keys never tested</span>
+        )}
+      </div>
+      <div className="flex items-end gap-6">
+        <div className="flex-1">
+          <div className="flex justify-between text-xs text-gray-500 mb-1">
+            <span>
+              {hasQuota
+                ? `${summary.totalRpdRemaining.toLocaleString()} / ${summary.totalRpdLimit.toLocaleString()} remaining`
+                : "No quota data — run Test All to populate"}
+            </span>
+            {hasQuota && <span>{pct}%</span>}
+          </div>
+          {hasQuota && (
+            <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all ${barColor}`}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+          )}
+        </div>
+        {earliestReset && (
+          <div className="text-right text-xs text-gray-500 whitespace-nowrap">
+            <span className="block text-gray-400">Next reset</span>
+            {new Date(earliestReset).toLocaleString("zh-TW", { timeZone: "Asia/Taipei", hour12: false })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Main App ───────────────────────────────────────────────────────
 export default function App() {
   const [keys, setKeys] = useState<ApiKey[]>([]);
+  const [quota, setQuota] = useState<QuotaSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [testing, setTesting] = useState(false);
   const [testingId, setTestingId] = useState<number | null>(null);
@@ -58,8 +129,12 @@ export default function App() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await apiFetch<ApiKey[]>("/api/keys");
+      const [data, q] = await Promise.all([
+        apiFetch<ApiKey[]>("/api/keys"),
+        apiFetch<QuotaSummary>("/api/keys/quota-summary"),
+      ]);
       setKeys(data);
+      setQuota(q);
     } finally {
       setLoading(false);
     }
@@ -94,6 +169,9 @@ export default function App() {
     try {
       const updated = await apiFetch<ApiKey>(`/api/keys/${id}/test`, { method: "POST" });
       setKeys((prev) => prev.map((k) => (k.id === id ? updated : k)));
+      // Refresh quota summary after testing
+      const q = await apiFetch<QuotaSummary>("/api/keys/quota-summary");
+      setQuota(q);
     } finally {
       setTestingId(null);
     }
@@ -128,6 +206,9 @@ export default function App() {
           }
         }
       }
+      // Refresh quota summary after full test
+      const q = await apiFetch<QuotaSummary>("/api/keys/quota-summary");
+      setQuota(q);
     } finally {
       setTesting(false);
       setProgress(null);
@@ -157,12 +238,6 @@ export default function App() {
     setTimeout(() => setCopied(false), 2500);
   }
 
-  function formatDate(iso: string | null) {
-    if (!iso) return "—";
-    const d = new Date(iso + (iso.endsWith("Z") ? "" : "Z"));
-    return d.toLocaleString("zh-TW", { timeZone: "Asia/Taipei", hour12: false });
-  }
-
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
@@ -179,6 +254,9 @@ export default function App() {
       <main className="max-w-6xl mx-auto px-4 sm:px-6 py-8">
         {/* Stats */}
         <Stats keys={keys} />
+
+        {/* Quota Bar */}
+        <QuotaBar summary={quota} />
 
         {/* Toolbar */}
         <div className="flex flex-wrap items-center gap-3 mb-4">
@@ -239,6 +317,8 @@ export default function App() {
                     <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">Account</th>
                     <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">Key</th>
                     <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">Status</th>
+                    <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">RPD Left</th>
+                    <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">Reset At</th>
                     <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">Last Tested</th>
                     <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">Projects</th>
                     <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide text-right">Actions</th>
@@ -256,8 +336,27 @@ export default function App() {
                       <td className="px-4 py-3">
                         <StatusBadge status={k.status} />
                       </td>
+                      <td className="px-4 py-3 text-xs whitespace-nowrap">
+                        {k.rpd_remaining !== null ? (
+                          <span className={
+                            k.rpd_remaining === 0 ? "text-red-600 font-medium" :
+                            k.rpd_remaining < 100 ? "text-yellow-600 font-medium" :
+                            "text-green-700"
+                          }>
+                            {k.rpd_remaining.toLocaleString()}
+                            {k.rpd_limit !== null && (
+                              <span className="text-gray-400"> / {k.rpd_limit.toLocaleString()}</span>
+                            )}
+                          </span>
+                        ) : (
+                          <span className="text-gray-300">—</span>
+                        )}
+                      </td>
                       <td className="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">
-                        {formatDate(k.last_tested_at)}
+                        {formatTaipei(k.reset_at)}
+                      </td>
+                      <td className="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">
+                        {formatTaipei(k.last_tested_at)}
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex flex-wrap gap-1">

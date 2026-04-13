@@ -12,5 +12,16 @@ export function runMigrations(db: Database): void {
       created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
     );
   `);
+
+  // Additive migrations — safe to run on existing DBs
+  const addCols = [
+    "ALTER TABLE api_keys ADD COLUMN rpd_limit INTEGER",
+    "ALTER TABLE api_keys ADD COLUMN rpd_remaining INTEGER",
+    "ALTER TABLE api_keys ADD COLUMN reset_at TEXT",
+  ];
+  for (const sql of addCols) {
+    try { db.exec(sql); } catch { /* column already exists */ }
+  }
+
   console.log("[migrate] done");
 }

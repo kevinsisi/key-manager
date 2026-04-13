@@ -12,6 +12,16 @@ interface ApiKey {
   last_tested_at: string | null;
   projects: string;
   created_at: string;
+  rpd_limit: number | null;
+  rpd_remaining: number | null;
+  reset_at: string | null;
+}
+
+interface TestResult {
+  status: "active" | "invalid" | "cooldown";
+  rpdLimit: number | null;
+  rpdRemaining: number | null;
+  resetAt: string | null;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────
@@ -33,21 +43,50 @@ function toPublic(row: ApiKey) {
       ? row.projects.split(",").map((p) => p.trim()).filter(Boolean)
       : [],
     created_at: row.created_at,
+    rpd_limit: row.rpd_limit ?? null,
+    rpd_remaining: row.rpd_remaining ?? null,
+    reset_at: row.reset_at ?? null,
   };
 }
 
-async function testKey(
-  key: string
-): Promise<"active" | "invalid" | "cooldown"> {
+function parseIntHeader(val: string | null): number | null {
+  if (!val) return null;
+  const n = parseInt(val, 10);
+  return isNaN(n) ? null : n;
+}
+
+async function testKey(key: string): Promise<TestResult> {
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-    if (res.ok) return "active";
-    if (res.status === 429) return "cooldown";
-    return "invalid";
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(key)}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: "hi" }] }],
+        generationConfig: { maxOutputTokens: 1 },
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    const rpdLimit = parseIntHeader(res.headers.get("x-ratelimit-limit"));
+    const rpdRemaining = parseIntHeader(res.headers.get("x-ratelimit-remaining"));
+    const resetAt = res.headers.get("x-ratelimit-reset");
+
+    if (res.ok) return { status: "active", rpdLimit, rpdRemaining, resetAt };
+    if (res.status === 429) return { status: "cooldown", rpdLimit, rpdRemaining, resetAt };
+    return { status: "invalid", rpdLimit: null, rpdRemaining: null, resetAt: null };
   } catch {
-    return "invalid";
+    return { status: "invalid", rpdLimit: null, rpdRemaining: null, resetAt: null };
   }
+}
+
+function applyTestResult(id: number, result: TestResult): void {
+  db.prepare(
+    `UPDATE api_keys
+     SET status = ?, last_tested_at = datetime('now'),
+         rpd_limit = ?, rpd_remaining = ?, reset_at = ?
+     WHERE id = ?`
+  ).run(result.status, result.rpdLimit, result.rpdRemaining, result.resetAt, id);
 }
 
 // ── GET /api/keys ─────────────────────────────────────────────────
@@ -56,6 +95,43 @@ router.get("/", (_req, res) => {
     .prepare("SELECT * FROM api_keys ORDER BY created_at DESC")
     .all() as ApiKey[];
   res.json(rows.map(toPublic));
+});
+
+// ── GET /api/keys/quota-summary ───────────────────────────────────
+router.get("/quota-summary", (_req, res) => {
+  const rows = db
+    .prepare("SELECT * FROM api_keys ORDER BY created_at DESC")
+    .all() as ApiKey[];
+
+  const active = rows.filter((r) => r.status === "active");
+  const cooldown = rows.filter((r) => r.status === "cooldown");
+  const invalid = rows.filter((r) => r.status === "invalid");
+  const unknown = rows.filter((r) => r.status === "unknown");
+
+  const totalRpdLimit = active.reduce((s, r) => s + (r.rpd_limit ?? 0), 0);
+  const totalRpdRemaining = active.reduce((s, r) => s + (r.rpd_remaining ?? 0), 0);
+  const neverTested = rows.filter((r) => r.last_tested_at === null).length;
+
+  res.json({
+    total: rows.length,
+    active: active.length,
+    cooldown: cooldown.length,
+    invalid: invalid.length,
+    unknown: unknown.length,
+    neverTested,
+    totalRpdLimit,
+    totalRpdRemaining,
+    keys: rows.map((r) => ({
+      id: r.id,
+      account_name: r.account_name,
+      key_suffix: r.key_value.slice(-8),
+      status: r.status,
+      rpd_limit: r.rpd_limit ?? null,
+      rpd_remaining: r.rpd_remaining ?? null,
+      reset_at: r.reset_at ?? null,
+      last_tested_at: r.last_tested_at,
+    })),
+  });
 });
 
 // ── GET /api/keys/export ──────────────────────────────────────────
@@ -268,10 +344,8 @@ router.post("/:id/test", async (req, res) => {
     return;
   }
 
-  const status = await testKey(row.key_value);
-  db.prepare(
-    `UPDATE api_keys SET status = ?, last_tested_at = datetime('now') WHERE id = ?`
-  ).run(status, id);
+  const result = await testKey(row.key_value);
+  applyTestResult(id, result);
 
   const updated = db
     .prepare("SELECT * FROM api_keys WHERE id = ?")
@@ -292,10 +366,8 @@ router.post("/test-all", async (req, res) => {
     .all() as ApiKey[];
 
   for (const row of rows) {
-    const status = await testKey(row.key_value);
-    db.prepare(
-      `UPDATE api_keys SET status = ?, last_tested_at = datetime('now') WHERE id = ?`
-    ).run(status, row.id);
+    const result = await testKey(row.key_value);
+    applyTestResult(row.id, result);
 
     const updated = db
       .prepare("SELECT * FROM api_keys WHERE id = ?")
