@@ -18,9 +18,7 @@ interface ApiKey {
 }
 
 interface TestResult {
-  status: "active" | "invalid" | "cooldown";
-  rpdLimit: number | null;
-  rpdRemaining: number | null;
+  status: "available" | "exhausted" | "rate_limited" | "invalid" | "error";
   resetAt: string | null;
 }
 
@@ -49,10 +47,23 @@ function toPublic(row: ApiKey) {
   };
 }
 
-function parseIntHeader(val: string | null): number | null {
-  if (!val) return null;
-  const n = parseInt(val, 10);
-  return isNaN(n) ? null : n;
+// Returns ISO string of next midnight in US/Pacific time, expressed in UTC
+function nextPacificMidnightISO(): string {
+  const now = new Date();
+  // Get current date components in Pacific time
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hour12: false,
+  }).formatToParts(now);
+  const p = Object.fromEntries(parts.filter(x => x.type !== "literal").map(x => [x.type, Number(x.value)]));
+  // Treat Pacific time components as fake UTC to compute offset
+  const pacificAsUTC = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+  const offsetMs = now.getTime() - pacificAsUTC; // e.g. +7h for PDT
+  // Next Pacific midnight in UTC = next Pacific day 00:00:00 + offset
+  const nextMidnightUTC = Date.UTC(p.year, p.month - 1, p.day + 1, 0, 0, 0) + offsetMs;
+  return new Date(nextMidnightUTC).toISOString();
 }
 
 async function testKey(key: string): Promise<TestResult> {
@@ -68,15 +79,28 @@ async function testKey(key: string): Promise<TestResult> {
       signal: AbortSignal.timeout(10_000),
     });
 
-    const rpdLimit = parseIntHeader(res.headers.get("x-ratelimit-limit"));
-    const rpdRemaining = parseIntHeader(res.headers.get("x-ratelimit-remaining"));
-    const resetAt = res.headers.get("x-ratelimit-reset");
+    if (res.ok) return { status: "available", resetAt: null };
 
-    if (res.ok) return { status: "active", rpdLimit, rpdRemaining, resetAt };
-    if (res.status === 429) return { status: "cooldown", rpdLimit, rpdRemaining, resetAt };
-    return { status: "invalid", rpdLimit: null, rpdRemaining: null, resetAt: null };
+    if (res.status === 429) {
+      let body: unknown = {};
+      try { body = await res.json(); } catch { /* ignore */ }
+      const msg = JSON.stringify(body).toLowerCase();
+      if (msg.includes("daily") || msg.includes("resource_exhausted")) {
+        return { status: "exhausted", resetAt: nextPacificMidnightISO() };
+      }
+      if (msg.includes("rate")) {
+        return { status: "rate_limited", resetAt: new Date(Date.now() + 60_000).toISOString() };
+      }
+      return { status: "exhausted", resetAt: nextPacificMidnightISO() };
+    }
+
+    if (res.status === 401 || res.status === 403) {
+      return { status: "invalid", resetAt: null };
+    }
+
+    return { status: "error", resetAt: null };
   } catch {
-    return { status: "invalid", rpdLimit: null, rpdRemaining: null, resetAt: null };
+    return { status: "error", resetAt: null };
   }
 }
 
@@ -84,9 +108,9 @@ function applyTestResult(id: number, result: TestResult): void {
   db.prepare(
     `UPDATE api_keys
      SET status = ?, last_tested_at = datetime('now'),
-         rpd_limit = ?, rpd_remaining = ?, reset_at = ?
+         rpd_limit = NULL, rpd_remaining = NULL, reset_at = ?
      WHERE id = ?`
-  ).run(result.status, result.rpdLimit, result.rpdRemaining, result.resetAt, id);
+  ).run(result.status, result.resetAt, id);
 }
 
 // ── GET /api/keys ─────────────────────────────────────────────────
@@ -103,31 +127,26 @@ router.get("/quota-summary", (_req, res) => {
     .prepare("SELECT * FROM api_keys ORDER BY created_at DESC")
     .all() as ApiKey[];
 
-  const active = rows.filter((r) => r.status === "active");
-  const cooldown = rows.filter((r) => r.status === "cooldown");
-  const invalid = rows.filter((r) => r.status === "invalid");
-  const unknown = rows.filter((r) => r.status === "unknown");
-
-  const totalRpdLimit = active.reduce((s, r) => s + (r.rpd_limit ?? 0), 0);
-  const totalRpdRemaining = active.reduce((s, r) => s + (r.rpd_remaining ?? 0), 0);
+  const available = rows.filter((r) => r.status === "available").length;
+  const exhausted = rows.filter((r) => r.status === "exhausted").length;
+  const rateLimited = rows.filter((r) => r.status === "rate_limited").length;
+  const invalid = rows.filter((r) => r.status === "invalid").length;
+  const unknown = rows.filter((r) => r.status === "unknown").length;
   const neverTested = rows.filter((r) => r.last_tested_at === null).length;
 
   res.json({
     total: rows.length,
-    active: active.length,
-    cooldown: cooldown.length,
-    invalid: invalid.length,
-    unknown: unknown.length,
+    available,
+    exhausted,
+    rate_limited: rateLimited,
+    invalid,
+    unknown,
     neverTested,
-    totalRpdLimit,
-    totalRpdRemaining,
     keys: rows.map((r) => ({
       id: r.id,
       account_name: r.account_name,
       key_suffix: r.key_value.slice(-8),
       status: r.status,
-      rpd_limit: r.rpd_limit ?? null,
-      rpd_remaining: r.rpd_remaining ?? null,
       reset_at: r.reset_at ?? null,
       last_tested_at: r.last_tested_at,
     })),
@@ -139,7 +158,7 @@ router.get("/quota-summary", (_req, res) => {
 router.get("/export", (_req, res) => {
   const rows = db
     .prepare(
-      "SELECT * FROM api_keys WHERE status IN ('active', 'cooldown') ORDER BY account_name, created_at"
+      "SELECT * FROM api_keys WHERE status = 'available' ORDER BY account_name, created_at"
     )
     .all() as ApiKey[];
 

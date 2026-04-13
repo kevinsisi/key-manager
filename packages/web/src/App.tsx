@@ -43,10 +43,10 @@ function Stats({ keys }: { keys: ApiKey[] }) {
   return (
     <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
       {[
-        { label: "Total", value: keys.length, color: "text-gray-900" },
-        { label: "Active", value: counts.active ?? 0, color: "text-green-600" },
-        { label: "Invalid", value: counts.invalid ?? 0, color: "text-red-600" },
-        { label: "Cooldown", value: counts.cooldown ?? 0, color: "text-yellow-600" },
+        { label: "Available",    value: counts.available    ?? 0, color: "text-green-600" },
+        { label: "Exhausted",    value: counts.exhausted    ?? 0, color: "text-red-600" },
+        { label: "Rate Limited", value: counts.rate_limited ?? 0, color: "text-yellow-600" },
+        { label: "Invalid",      value: counts.invalid      ?? 0, color: "text-gray-400" },
       ].map(({ label, value, color }) => (
         <div key={label} className="bg-white rounded-xl border border-gray-200 p-4 text-center shadow-sm">
           <p className={`text-2xl font-bold ${color}`}>{value}</p>
@@ -61,54 +61,30 @@ function Stats({ keys }: { keys: ApiKey[] }) {
 function QuotaBar({ summary }: { summary: QuotaSummary | null }) {
   if (!summary) return null;
 
-  const hasQuota = summary.totalRpdLimit > 0;
-  const pct = hasQuota ? Math.round((summary.totalRpdRemaining / summary.totalRpdLimit) * 100) : 0;
-  const barColor = pct > 50 ? "bg-green-500" : pct > 20 ? "bg-yellow-500" : "bg-red-500";
-
-  // Earliest reset time among active keys that have one
-  const resets = summary.keys
-    .filter((k) => k.status === "active" && k.reset_at)
-    .map((k) => {
-      const n = Number(k.reset_at);
-      return isNaN(n) ? new Date(k.reset_at!).getTime() : n * 1000;
-    })
-    .filter((t) => !isNaN(t));
-  const earliestReset = resets.length > 0 ? Math.min(...resets) : null;
+  const items = [
+    { label: "Available",    value: summary.available,    dot: "bg-green-500" },
+    { label: "Exhausted",    value: summary.exhausted,    dot: "bg-red-500" },
+    { label: "Rate Limited", value: summary.rate_limited, dot: "bg-yellow-500" },
+    { label: "Invalid",      value: summary.invalid,      dot: "bg-gray-400" },
+  ];
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-4 mb-6 shadow-sm">
-      <div className="flex items-center gap-2 mb-2">
+      <div className="flex items-center gap-2 mb-3">
         <BarChart2 size={16} className="text-blue-600" />
-        <span className="text-sm font-medium text-gray-700">RPD Quota (active keys)</span>
+        <span className="text-sm font-medium text-gray-700">Key Pool Overview</span>
         {summary.neverTested > 0 && (
-          <span className="text-xs text-gray-400 ml-auto">{summary.neverTested} keys never tested</span>
+          <span className="text-xs text-gray-400 ml-auto">{summary.neverTested} never tested</span>
         )}
       </div>
-      <div className="flex items-end gap-6">
-        <div className="flex-1">
-          <div className="flex justify-between text-xs text-gray-500 mb-1">
-            <span>
-              {hasQuota
-                ? `${summary.totalRpdRemaining.toLocaleString()} / ${summary.totalRpdLimit.toLocaleString()} remaining`
-                : "No quota data — run Test All to populate"}
-            </span>
-            {hasQuota && <span>{pct}%</span>}
+      <div className="flex flex-wrap gap-6">
+        {items.map(({ label, value, dot }) => (
+          <div key={label} className="flex items-center gap-2">
+            <div className={`w-2.5 h-2.5 rounded-full ${dot}`} />
+            <span className="text-sm text-gray-700 font-medium">{value}</span>
+            <span className="text-xs text-gray-500">{label}</span>
           </div>
-          {hasQuota && (
-            <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-              <div
-                className={`h-full rounded-full transition-all ${barColor}`}
-                style={{ width: `${pct}%` }}
-              />
-            </div>
-          )}
-        </div>
-        {earliestReset && (
-          <div className="text-right text-xs text-gray-500 whitespace-nowrap">
-            <span className="block text-gray-400">Next reset</span>
-            {new Date(earliestReset).toLocaleString("zh-TW", { timeZone: "Asia/Taipei", hour12: false })}
-          </div>
-        )}
+        ))}
       </div>
     </div>
   );
@@ -285,7 +261,7 @@ export default function App() {
           </button>
           <button
             onClick={handleCopyKeys}
-            disabled={keys.filter((k) => k.status === "active" || k.status === "cooldown").length === 0}
+            disabled={keys.filter((k) => k.status === "available").length === 0}
             className="inline-flex items-center gap-2 border border-purple-300 text-purple-700 bg-purple-50 px-4 py-2 rounded-lg text-sm font-medium hover:bg-purple-100 transition-colors disabled:opacity-50"
             title="複製全部可用金鑰（按擁有者分組 + .env 格式）"
           >
@@ -317,7 +293,6 @@ export default function App() {
                     <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">Account</th>
                     <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">Key</th>
                     <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">Status</th>
-                    <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">RPD Left</th>
                     <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">Reset At</th>
                     <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">Last Tested</th>
                     <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase tracking-wide">Projects</th>
@@ -336,24 +311,8 @@ export default function App() {
                       <td className="px-4 py-3">
                         <StatusBadge status={k.status} />
                       </td>
-                      <td className="px-4 py-3 text-xs whitespace-nowrap">
-                        {k.rpd_remaining !== null ? (
-                          <span className={
-                            k.rpd_remaining === 0 ? "text-red-600 font-medium" :
-                            k.rpd_remaining < 100 ? "text-yellow-600 font-medium" :
-                            "text-green-700"
-                          }>
-                            {k.rpd_remaining.toLocaleString()}
-                            {k.rpd_limit !== null && (
-                              <span className="text-gray-400"> / {k.rpd_limit.toLocaleString()}</span>
-                            )}
-                          </span>
-                        ) : (
-                          <span className="text-gray-300">—</span>
-                        )}
-                      </td>
                       <td className="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">
-                        {formatTaipei(k.reset_at)}
+                        {(k.status === "exhausted" || k.status === "rate_limited") ? formatTaipei(k.reset_at) : "—"}
                       </td>
                       <td className="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">
                         {formatTaipei(k.last_tested_at)}
