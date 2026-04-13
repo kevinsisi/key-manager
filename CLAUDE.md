@@ -77,11 +77,27 @@ Base path: `/api/keys`
 | `PUT` | `/:id` | Update `account_name` and `projects` |
 | `DELETE` | `/:id` | Remove key |
 | `POST` | `/:id/test` | Test single key against Google API → `{status}` |
-| `POST` | `/test-all` | Test all keys via SSE stream (`text/event-stream`) |
+| `POST` | `/test-all` | Test all keys via SSE stream (`text/event-stream`); emits `{id, status}` per key |
+| `GET` | `/quota-summary` | Aggregate key counts by status: `available / exhausted / rate_limited / invalid / unknown` |
 
 **Key validation:** must start with `AIza`, min length 20.
-**Test endpoint:** `https://generativelanguage.googleapis.com/v1beta/models?key={key}`, 10s timeout.
-**Status mapping:** 200 → `active`, 429 → `cooldown`, other → `invalid`.
+
+**Test endpoint (v1.3.0+):** `POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={key}`, 10s timeout.
+- Uses a minimal `generateContent` request body to verify real quota availability, not just key validity.
+- **Four-state status mapping:**
+
+| HTTP Response | Status | Meaning |
+|--------------|--------|---------|
+| 200 | `available` | Key is valid and has quota |
+| 429 (quota exceeded) | `exhausted` | Key valid but daily/minute quota used up |
+| 429 (rate limited) | `rate_limited` | Temporarily throttled; retry later |
+| 400 / 403 / other | `invalid` | Key is revoked, invalid, or rejected |
+
+- **Gemini free-tier limitation:** Free-tier keys do NOT return `X-RateLimit-*` headers. The only reliable way to distinguish `exhausted` vs `rate_limited` is by parsing the error message body from the 429 response.
+
+**quota-summary endpoint:** `GET /api/keys/quota-summary`
+- Returns aggregate counts of keys per status: `{ available, exhausted, rate_limited, invalid, unknown }`
+- Used by consumers (e.g., `ai-core`) to decide which pool to draw from without exposing individual key values.
 
 ---
 
@@ -115,6 +131,46 @@ npm start             # node packages/server/dist/index.js
 # Docker
 docker compose up -d
 ```
+
+---
+
+## Consumer Sync Integration
+
+key-manager acts as the central key registry. Consumer services (built on `@kevinsisi/ai-core`) sync keys via the `/api/keys/export` endpoint.
+
+### Export Endpoint Response Format
+
+`GET /api/keys/export` returns unmasked keys grouped by account:
+
+```json
+{
+  "keys": [
+    { "key_value": "AIza...", "account_name": "account1", "status": "active" },
+    { "key_value": "AIza...", "account_name": "account2", "status": "cooldown" }
+  ]
+}
+```
+
+Only `active` and `cooldown` keys are included. `invalid` and `unknown` keys are excluded.
+
+### Consumer Sync Workflow
+
+| Step | Direction | Operation |
+|------|-----------|-----------|
+| `syncFromManager` | key-manager → consumer | Pull from `GET /api/keys/export`, seed local `KeyPool` via `addApiKey()` |
+| `testAllKeys` | consumer → Gemini API | Validate each key; update cooldown state locally |
+| `reportToManager` | consumer → key-manager | (Optional) Push updated key statuses back via `PUT /:id` or custom endpoint |
+| `getKeyStatus` | consumer reads pool | Use `KeyPool.status()` or `getKeyList()` for per-key state |
+
+### Usage Pattern
+
+- Call `syncFromManager` at service startup (or on a cron) to seed the local pool.
+- After syncing, use `KeyPool` normally — key rotation and cooldown are handled by `@kevinsisi/ai-core`.
+- The `quota-summary` endpoint (`GET /api/keys/quota-summary`) gives aggregate counts without exposing key values — use it for health checks or dashboards.
+
+### Reference Implementation
+
+`sheet-to-car` (`src/routes/keys.ts`) is the canonical reference for the full sync + test + report cycle.
 
 ---
 
