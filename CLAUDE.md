@@ -71,7 +71,7 @@ Base path: `/api/keys`
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/` | List all keys (masked: last 8 chars + asterisks) |
-| `GET` | `/export` | Export keys unmasked, grouped by account. Returns `groups` (all available, legacy), `trusted_groups` (bucket-scoped available), `trusted_total`, and `legacy_total`. |
+| `GET` | `/export` | Export active/cooldown keys, unmasked, grouped by account |
 | `POST` | `/` | Add single key (validates `AIza` prefix, min 20 chars) |
 | `POST` | `/batch-import` | Bulk import — accepts JSON array, `key=value`, export prefix, CSV |
 | `PUT` | `/:id` | Update `account_name` and `projects` |
@@ -120,7 +120,6 @@ Base path: `/api/keys`
 | `PORT` | `7823` | Server listen port |
 | `DATABASE_PATH` | `./data/key-manager.db` | SQLite file path |
 | `TZ` | `Asia/Taipei` | Container timezone |
-| `KM_AUTH_TOKEN` | | Bearer token for API authentication. If set, all /api/* routes require Authorization: Bearer <token>. Leave unset to disable auth (dev mode). |
 
 ### Build & Run
 
@@ -157,14 +156,6 @@ key-manager acts as the central key registry. Consumer services (built on `@kevi
 
 Default mode remains legacy/raw for backward compatibility, but `GET /api/keys/export?trusted_only=1` returns only keys from trusted `available` buckets.
 
-### 複製可用金鑰 Button Behavior
-
-The frontend "複製可用金鑰" button (previously "複製可信金鑰") fetches `GET /api/keys/export` and selects which group to copy:
-
-- If `trusted_total > 0`, use `trusted_groups` (bucket-scoped available keys).
-- Otherwise fall back to `groups` (all available keys, legacy mode).
-- The button is **disabled** when `available === 0`.
-
 ### Consumer Sync Workflow
 
 | Step | Direction | Operation |
@@ -191,7 +182,7 @@ The frontend "複製可用金鑰" button (previously "複製可信金鑰") fetch
 1. **Do not upgrade existing package versions.** Pin all packages at their current versions.
 2. **ESM only.** Both packages use `"type": "module"`. Avoid CommonJS patterns (`require`, `module.exports`).
 3. **No ORM.** Use `better-sqlite3` directly with raw SQL. Keep queries in `routes/keys.ts` or `db/`.
-4. **Optional auth via KM_AUTH_TOKEN.** Set the `KM_AUTH_TOKEN` env var to enable Bearer token auth on all API routes. Frontend shows a login screen when not authenticated; token stored in localStorage. If env var is unset, auth is disabled (dev mode).
+4. **No auth layer.** This is a private, self-hosted tool on a trusted network. Do not add authentication middleware unless explicitly requested.
 5. **Single binary / static serve.** The server serves the built web assets from `../../web/dist`. Do not split into separate deployment targets.
 6. **Tailwind only for styling.** Do not introduce CSS-in-JS or additional styling libraries.
 7. **Key masking is mandatory.** Never return full `key_value` in the `/` list endpoint. Only `/export` may return unmasked keys.
