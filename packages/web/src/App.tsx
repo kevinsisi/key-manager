@@ -6,11 +6,22 @@ import { EditKeyModal } from "./components/EditKeyModal.tsx";
 import { BatchImportSection } from "./components/BatchImportSection.tsx";
 import type { ApiKey, QuotaSummary, QuotaBucket } from "./types.ts";
 
+// ── Auth token storage ─────────────────────────────────────────────
+const TOKEN_KEY = "km:auth-token";
+function getStoredToken(): string { return localStorage.getItem(TOKEN_KEY) ?? ''; }
+function setStoredToken(t: string): void { localStorage.setItem(TOKEN_KEY, t); }
+function clearStoredToken(): void { localStorage.removeItem(TOKEN_KEY); }
+
 // ── API helpers ────────────────────────────────────────────────────
-async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
+async function apiFetch<T>(url: string, init?: RequestInit, token?: string): Promise<T> {
+  const t = token ?? getStoredToken();
   const res = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
     ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(t ? { "Authorization": `Bearer ${t}` } : {}),
+      ...(init?.headers as Record<string, string> ?? {}),
+    },
   });
   const json = await res.json();
   if (!res.ok) throw new Error(json.error || "Request failed");
@@ -131,8 +142,66 @@ function BucketList({ buckets }: { buckets: QuotaBucket[] }) {
   );
 }
 
-// ── Main App ───────────────────────────────────────────────────────
-export default function App() {
+// ── Login screen ───────────────────────────────────────────────────
+function LoginScreen({ onLogin }: { onLogin: (token: string) => void }) {
+  const [value, setValue] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const token = value.trim();
+    if (!token) return;
+    setLoading(true);
+    setError('');
+    try {
+      await apiFetch('/api/keys/quota-summary', undefined, token);
+      setStoredToken(token);
+      onLogin(token);
+    } catch {
+      setError('Token 錯誤，請重新輸入');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+      <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-8 w-full max-w-sm">
+        <div className="flex items-center gap-3 mb-6">
+          <div className="w-9 h-9 bg-blue-600 rounded-lg flex items-center justify-center">
+            <Key size={18} className="text-white" />
+          </div>
+          <div>
+            <h1 className="text-base font-semibold text-gray-900">Key Manager</h1>
+            <p className="text-xs text-gray-500">請輸入存取 Token</p>
+          </div>
+        </div>
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <input
+            type="password"
+            value={value}
+            onChange={e => setValue(e.target.value)}
+            placeholder="Access Token"
+            autoFocus
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          {error && <p className="text-xs text-red-600">{error}</p>}
+          <button
+            type="submit"
+            disabled={loading || !value.trim()}
+            className="w-full bg-blue-600 text-white py-2 rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
+          >
+            {loading ? '驗證中…' : '登入'}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ── Dashboard (rendered only when authenticated) ───────────────────
+function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [quota, setQuota] = useState<QuotaSummary | null>(null);
   const [loading, setLoading] = useState(true);
@@ -152,6 +221,8 @@ export default function App() {
       ]);
       setKeys(data);
       setQuota(q);
+    } catch (err: any) {
+      if (err.message === 'Unauthorized') { clearStoredToken(); onLogout(); }
     } finally {
       setLoading(false);
     }
@@ -198,7 +269,11 @@ export default function App() {
     setTesting(true);
     setProgress("Starting…");
     try {
-      const res = await fetch("/api/keys/test-all", { method: "POST" });
+      const token = getStoredToken();
+      const res = await fetch("/api/keys/test-all", {
+        method: "POST",
+        headers: token ? { "Authorization": `Bearer ${token}` } : {},
+      });
       if (!res.body) return;
 
       const reader = res.body.getReader();
@@ -274,6 +349,13 @@ export default function App() {
           <h1 className="text-lg font-semibold text-gray-900 leading-tight">Key Manager</h1>
           <p className="text-xs text-gray-500">Gemini API key pool dashboard</p>
         </div>
+        <button
+          onClick={() => { clearStoredToken(); onLogout(); }}
+          className="ml-auto text-xs text-gray-400 hover:text-gray-600 transition-colors"
+          title="登出"
+        >
+          登出
+        </button>
       </header>
 
       <main className="max-w-6xl mx-auto px-4 sm:px-6 py-8">
@@ -324,7 +406,7 @@ export default function App() {
         </div>
 
         {/* Batch Import */}
-        <BatchImportSection onImported={load} />
+        <BatchImportSection onImported={load} token={getStoredToken()} />
 
         {/* Table */}
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
@@ -434,4 +516,12 @@ export default function App() {
       )}
     </div>
   );
+}
+
+// ── Root App ───────────────────────────────────────────────────────
+export default function App() {
+  const [authed, setAuthed] = useState(() => !!getStoredToken());
+
+  if (!authed) return <LoginScreen onLogin={() => setAuthed(true)} />;
+  return <Dashboard onLogout={() => setAuthed(false)} />;
 }
