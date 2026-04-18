@@ -72,10 +72,9 @@ interface ImportResult {
 
 interface Props {
   onImported: () => void;
-  token?: string;
 }
 
-export function BatchImportSection({ onImported, token }: Props) {
+export function BatchImportSection({ onImported }: Props) {
   const [open, setOpen] = useState(false);
   const [rawText, setRawText] = useState("");
   const [accountName, setAccountName] = useState("");
@@ -101,10 +100,7 @@ export function BatchImportSection({ onImported, token }: Props) {
     try {
       const res = await fetch("/api/keys/batch-import", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { "Authorization": `Bearer ${token}` } : {}),
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           raw_text: rawText,
           account_name: accountName,

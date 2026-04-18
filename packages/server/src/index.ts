@@ -20,23 +20,9 @@ fs.mkdirSync(path.resolve(dataBase), { recursive: true });
 // ── Express ────────────────────────────────────────────────────────
 const app = express();
 const PORT = Number(process.env.PORT) || 7823;
-const AUTH_TOKEN = process.env.KM_AUTH_TOKEN?.trim() || '';
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
-
-// ── Auth middleware (skipped if KM_AUTH_TOKEN not set) ─────────────
-if (AUTH_TOKEN) {
-  app.use('/api', (req, res, next) => {
-    const header = req.headers.authorization || '';
-    const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-    if (token !== AUTH_TOKEN) {
-      res.status(401).json({ error: 'Unauthorized' });
-      return;
-    }
-    next();
-  });
-}
 
 // ── API routes ─────────────────────────────────────────────────────
 app.use("/api/keys", keysRouter);

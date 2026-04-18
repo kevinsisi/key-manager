@@ -9,7 +9,6 @@ services:
       - TZ=Asia/Taipei
       - PORT=7823
       - DATABASE_PATH=/app/data/key-manager.db
-      - KM_AUTH_TOKEN=${KM_AUTH_TOKEN:-}
     volumes:
       - key-manager-data:/app/data
 
