@@ -233,11 +233,19 @@ export default function App() {
   }
 
   async function handleCopyKeys() {
-    const data = await apiFetch<{ total: number; groups: Record<string, string[]> }>("/api/keys/export?trusted_only=1");
-    const { total, groups } = data;
+    const data = await apiFetch<{
+      total: number; trusted_total: number; legacy_total: number;
+      groups: Record<string, string[]>; trusted_groups: Record<string, string[]>;
+    }>("/api/keys/export");
+
+    // Prefer trusted keys; fall back to all available keys
+    const useTrusted = data.trusted_total > 0;
+    const groups = useTrusted ? data.trusted_groups : data.groups;
+    const total = useTrusted ? data.trusted_total : data.legacy_total;
+    const label = useTrusted ? "可信" : "可用";
 
     const lines: string[] = [];
-    lines.push(`# ===== 可信 Key Pool（${total} keys，去重後）=====`);
+    lines.push(`# ===== ${label} Key Pool（${total} keys，去重後）=====`);
 
     for (const [owner, ownerKeys] of Object.entries(groups)) {
       lines.push("");
@@ -246,7 +254,7 @@ export default function App() {
     }
 
     lines.push("");
-    lines.push(`# ===== .env 一鍵貼上（可信 ${total} keys）=====`);
+    lines.push(`# ===== .env 一鍵貼上（${label} ${total} keys）=====`);
     const allKeys = Object.values(groups).flat();
     lines.push(`# GEMINI_API_KEYS=${allKeys.join(",")}`);
 
@@ -303,12 +311,12 @@ export default function App() {
           </button>
           <button
             onClick={handleCopyKeys}
-            disabled={(quota?.trusted_available_keys ?? 0) === 0}
+            disabled={(quota?.available ?? 0) === 0}
             className="inline-flex items-center gap-2 border border-purple-300 text-purple-700 bg-purple-50 px-4 py-2 rounded-lg text-sm font-medium hover:bg-purple-100 transition-colors disabled:opacity-50"
-            title="複製全部可信金鑰（只包含有 bucket 標註且可用的 keys）"
+            title="複製可用金鑰（有 bucket 時優先複製可信金鑰，否則複製全部可用金鑰）"
           >
             {copied ? <Check size={16} className="text-green-600" /> : <ClipboardCopy size={16} />}
-            {copied ? "已複製！" : "複製可信金鑰"}
+            {copied ? "已複製！" : "複製可用金鑰"}
           </button>
           {progress && (
             <span className="text-sm text-gray-500 italic">{progress}</span>
